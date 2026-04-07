@@ -1,0 +1,21 @@
+{
+  "package_id": "com.drew.talk",
+  "edition": "202601",
+  "name": "Talk Demo",
+  "version": "0.2.5",
+  "min_app_version": "2.0.0",
+  "min_sdk_version": "0.0.7",
+  "entrypoint": "index.html",
+  "permissions": [
+    {
+      "name": "network",
+      "desc": "For the railway host server",
+      "whitelist": [
+        "talky-production-fa31.up.railway.app"
+      ]
+    }
+  ],
+  "supported_languages": [
+    "en"
+  ]
+}
