@@ -1,0 +1,22 @@
+{
+  "name": "clinical-copilot",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+,
+  "dependencies": {
+    "@evenrealities/even_hub_sdk": "^0.0.9",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.0",
+    "even-toolkit": "^1.6.5",
+    "express": "^5.2.1",
+    "openai": "^6.33.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@evenrealities/evenhub-cli": "^0.1.11",
+    "vite": "^8.0.3"
+  }
+}
