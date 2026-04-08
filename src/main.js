@@ -12,10 +12,11 @@ async function init() {
     const sdk = await import("@evenrealities/even_hub_sdk");
     const bridge = await sdk.waitForEvenAppBridge();
 
-    const STORAGE_KEY = "clinical_copilot_v11_transcript_tail";
+    const STORAGE_KEY = "clinical_copilot_v12_transcript_tail";
     const MAX_BUBBLES = 8;
     const VISIBLE_BUBBLES = 3;
     const SAFE_CHAR_LIMIT = 360;
+    const EXPANDED_CHAR_LIMIT = 2200;
     const W = 46;
     const TRANSCRIPT_LINES = 3;
     const MIN_AUDIO_BYTES = 2000;
@@ -51,15 +52,15 @@ async function init() {
     let hasAutoStarted = false;
     let lastError = "";
 
-    let renderPending = false;
-    let lastRenderAt = 0;
-    const RENDER_THROTTLE_MS = 200; // max ~5 redraws/sec to keep firmware queue clear
-
     let pendingUi = {
       title: null,
       oneLiner: null,
       bubbles: [],
     };
+
+    let renderInFlight = false;
+    let renderQueued = false;
+    let lastRenderedText = "";
 
     function setStatus(msg) {
       status.textContent = msg;
@@ -307,11 +308,7 @@ async function init() {
         lines.push(centerStr(snap.title || conversationTitle, W - 1) + " ");
         lines.push("");
 
-        const summaryLines = wrapText(
-          snap.summary || "No summary yet.",
-          W
-        );
-
+        const summaryLines = wrapText(snap.summary || "No summary yet.", W);
         for (const l of summaryLines) lines.push(l);
 
         return lines.join("\n");
@@ -393,29 +390,22 @@ async function init() {
     }
 
     async function updateGlassesText(text) {
-      // textContainerUpgrade max is 2,000 chars (per SDK docs).
-      // In expanded view we need the full content so firmware can scroll it natively.
-      // On the main screen 360 chars is plenty and keeps updates snappy.
       const isExpanded = expanded === "title" || typeof expanded === "number";
-      const limit = isExpanded ? 1600 : SAFE_CHAR_LIMIT;
-
+      const limit = isExpanded ? EXPANDED_CHAR_LIMIT : SAFE_CHAR_LIMIT;
       const safeText =
-        text.length > limit
-          ? text.slice(0, limit - 3) + "..."
-          : text;
+        text.length > limit ? text.slice(0, limit - 3) + "..." : text;
 
-      // SDK expects positional args: (containerID, containerName, content, contentOffset, contentLength)
-      await bridge.textContainerUpgrade(
-        1,
-        "mainText",
-        safeText,
-        0,
-        safeText.length
-      );
+      // Restore the object-style API that was working before.
+      await bridge.textContainerUpgrade({
+        containerID: 1,
+        containerName: "mainText",
+        contentOffset: 0,
+        contentLength: safeText.length,
+        content: safeText,
+      });
     }
 
-    // renderNow: use for input events (taps, scrolls) — must feel instant
-    async function renderNow() {
+    async function renderCore() {
       const text = buildScreen();
 
       details.textContent =
@@ -431,24 +421,30 @@ async function init() {
         `live=${liveTranscript}\n\n` +
         `display:\n${text}`;
 
-      lastRenderAt = Date.now();
-      renderPending = false;
+      if (text === lastRenderedText) return;
+      lastRenderedText = text;
+
       await updateGlassesText(text);
     }
 
-    // render: throttled — for background updates (transcripts, analysis, indicator)
-    // Coalesces rapid-fire calls so the firmware queue never backs up
-    async function render() {
-      const now = Date.now();
-      const sinceLastRender = now - lastRenderAt;
+    function requestRender() {
+      renderQueued = true;
+      queueMicrotask(runRenderLoop);
+    }
 
-      if (sinceLastRender >= RENDER_THROTTLE_MS) {
-        await renderNow();
-      } else if (!renderPending) {
-        renderPending = true;
-        setTimeout(async () => {
-          if (renderPending) await renderNow();
-        }, RENDER_THROTTLE_MS - sinceLastRender);
+    async function runRenderLoop() {
+      if (renderInFlight || !renderQueued) return;
+      renderInFlight = true;
+
+      try {
+        while (renderQueued) {
+          renderQueued = false;
+          await renderCore();
+        }
+      } catch (err) {
+        console.error("Render error:", err);
+      } finally {
+        renderInFlight = false;
       }
     }
 
@@ -456,15 +452,13 @@ async function init() {
       stopIndicator();
       liveIndicatorOn = true;
 
-      indicatorInterval = setInterval(async () => {
+      indicatorInterval = setInterval(() => {
         if (!isListening) return;
         if (expanded !== null) return;
 
         liveIndicatorOn = !liveIndicatorOn;
-        try {
-          await render();
-        } catch {}
-      }, 900);
+        requestRender();
+      }, 700);
     }
 
     function stopIndicator() {
@@ -516,6 +510,7 @@ async function init() {
             isListening = false;
             stopIndicator();
             setStatus(`Reconnecting... WS ${event.code} ${event.reason || ""}`);
+            requestRender();
             queueReconnect();
           }
         };
@@ -526,7 +521,7 @@ async function init() {
 
             if (msg.type === "transcript" && msg.text) {
               liveTranscript = normalizeDisplayText(msg.text);
-              if (expanded === null) await render();
+              if (expanded === null) requestRender();
             }
 
             if (msg.type === "final_transcript" && msg.text) {
@@ -551,7 +546,7 @@ async function init() {
 
               liveTranscript = "";
 
-              if (expanded === null) await render();
+              if (expanded === null) requestRender();
             }
 
             if (msg.type === "analysis") {
@@ -593,17 +588,17 @@ async function init() {
               }
 
               setStatus(isListening ? "Listening" : "Updated");
-              await render();
+              requestRender();
             }
 
             if (msg.type === "stopped") {
               setStatus("Stopped");
-              if (expanded === null) await render();
+              if (expanded === null) requestRender();
             }
 
             if (msg.type === "error") {
               setStatus("ERR: " + String(msg.error || "").slice(0, 50));
-              if (expanded === null) await render();
+              if (expanded === null) requestRender();
             }
           } catch (err) {
             console.error("WS message error:", err);
@@ -617,7 +612,7 @@ async function init() {
 
       try {
         setStatus("Connecting...");
-        await render();
+        requestRender();
 
         const clearResp = await fetch(`${API_BASE}/session/clear`, {
           method: "POST",
@@ -650,16 +645,15 @@ async function init() {
         fullTranscript = "";
 
         setStatus("Listening");
-
         startIndicator();
         await bridge.audioControl(true);
-        await render();
+        requestRender();
       } catch (err) {
         setStatus("Connect failed: " + (err?.message || ""));
         streamSocket = null;
         isListening = false;
         stopIndicator();
-        await render();
+        requestRender();
         queueReconnect();
       }
     }
@@ -675,6 +669,7 @@ async function init() {
       } catch {}
 
       setStatus(final ? "Processing..." : "Stopped");
+      requestRender();
 
       if (
         final &&
@@ -701,7 +696,7 @@ async function init() {
         streamSocket = null;
       }
 
-      await render();
+      requestRender();
     }
 
     async function shutdownApp() {
@@ -746,7 +741,7 @@ async function init() {
     });
 
     setStatus("Launching...");
-    await render();
+    requestRender();
 
     if (!hasAutoStarted) {
       hasAutoStarted = true;
@@ -788,27 +783,27 @@ async function init() {
           expanded = null;
           expandedSnapshot = null;
           applyPendingUi();
-          await renderNow();
+          requestRender();
           return;
         }
 
         if (expanded === "exit") {
           expanded = null;
           expandedSnapshot = null;
-          await renderNow();
+          requestRender();
           return;
         }
 
         expanded = "exit";
         exitSelection = 1;
-        await renderNow();
+        requestRender();
         return;
       }
 
       if (isScrollUp) {
         if (expanded === "exit") {
           exitSelection = 0;
-          await renderNow();
+          requestRender();
           return;
         }
 
@@ -822,14 +817,14 @@ async function init() {
           hoverIndex = bubbles.length > 0 ? 0 : "title";
         }
 
-        await renderNow();
+        requestRender();
         return;
       }
 
       if (isScrollDown) {
         if (expanded === "exit") {
           exitSelection = 1;
-          await renderNow();
+          requestRender();
           return;
         }
 
@@ -843,7 +838,7 @@ async function init() {
           hoverIndex = bubbles.length > 0 ? 0 : "title";
         }
 
-        await renderNow();
+        requestRender();
         return;
       }
 
@@ -854,7 +849,7 @@ async function init() {
           } else {
             expanded = null;
             expandedSnapshot = null;
-            await renderNow();
+            requestRender();
           }
           return;
         }
@@ -863,25 +858,25 @@ async function init() {
           expanded = null;
           expandedSnapshot = null;
           applyPendingUi();
-          await renderNow();
+          requestRender();
           return;
         }
 
         if (hoverIndex === "title") {
           expanded = "title";
           freezeExpandedSnapshot();
-          await renderNow();
+          requestRender();
           return;
         }
 
         if (typeof hoverIndex === "number" && bubbles[hoverIndex]) {
           expanded = hoverIndex;
           freezeExpandedSnapshot();
-          await renderNow();
+          requestRender();
           return;
         }
 
-        await renderNow();
+        requestRender();
       }
     });
   } catch (err) {
