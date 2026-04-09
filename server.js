@@ -646,7 +646,7 @@ function openDeepgramSocket() {
       "vad_events=true",
       "punctuate=true",
       "smart_format=true",
-      "endpointing=400",
+      "endpointing=true",
       "diarize=true",
     ];
 
