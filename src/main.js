@@ -24,7 +24,7 @@ async function init() {
     const TRANSCRIPT_RENDER_CAP = 2600;
     const TRANSCRIPT_KEEP_TAIL = 1800;
 
-    const TOKEN = "98asdf9vy89wuhev872yufhvkskdfj28374siduhvdjw8723rhjdngjlshruuhjbduyge89dfs82";
+    const TOKEN = "YOUR_TOKEN_HERE";
     const API_BASE = "https://talky-production-fa31.up.railway.app";
     const WS_BASE = "wss://talky-production-fa31.up.railway.app";
 
