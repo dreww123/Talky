@@ -1,18 +1,234 @@
 <!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <title>Clinical Copilot</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <style>
-      body { font-family: monospace; padding: 1rem; background: #111; color: #0f0; }
-      #status { font-size: 1.2rem; margin-bottom: 0.5rem; }
-      #details { font-size: 0.85rem; white-space: pre-wrap; opacity: 0.7; }
-    </style>
-  </head>
-  <body>
-    <div id="status">Booting...</div>
-    <pre id="details"></pre>
-    <script type="module" src="/src/main.js"></script>
-  </body>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Clinical Copilot</title>
+
+  <style>
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      background: #0f1115;
+      color: #e6e6e6;
+    }
+
+    .container {
+      max-width: 900px;
+      margin: auto;
+      padding: 12px;
+    }
+
+    h1 {
+      font-size: 18px;
+      margin: 8px 0;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .tab {
+      flex: 1;
+      text-align: center;
+      padding: 10px;
+      border-radius: 8px;
+      background: #1a1d24;
+      cursor: pointer;
+      font-size: 14px;
+    }
+
+    .tab.active {
+      background: #2a2f3a;
+      font-weight: 600;
+    }
+
+    .panel {
+      display: none;
+      background: #151820;
+      border-radius: 10px;
+      padding: 12px;
+      min-height: 200px;
+    }
+
+    .panel.active {
+      display: block;
+    }
+
+    .empty {
+      opacity: 0.5;
+      font-style: italic;
+    }
+
+    /* Transcript */
+    #transcript-panel {
+      white-space: pre-wrap;
+      line-height: 1.5;
+      font-size: 14px;
+    }
+
+    /* Insight Cards */
+    .insight-card {
+      background: #1c2028;
+      border-radius: 10px;
+      padding: 10px;
+      margin-bottom: 10px;
+      border: 1px solid #2a2f3a;
+    }
+
+    .insight-top {
+      margin-bottom: 6px;
+    }
+
+    .badge {
+      font-size: 11px;
+      padding: 3px 6px;
+      border-radius: 6px;
+      font-weight: 600;
+    }
+
+    .badge.question {
+      background: #2d4eff;
+    }
+
+    .badge.insight {
+      background: #00a67e;
+    }
+
+    .badge.factcheck {
+      background: #ff4d4f;
+    }
+
+    .insight-short {
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+
+    .insight-expanded {
+      font-size: 13px;
+      opacity: 0.9;
+      line-height: 1.4;
+    }
+
+    /* Summary */
+    #summary-title {
+      font-weight: bold;
+      margin-bottom: 6px;
+    }
+
+    #summary-text {
+      margin-bottom: 12px;
+      line-height: 1.4;
+    }
+
+    #summary-detail {
+      font-size: 13px;
+      opacity: 0.9;
+      background: #1c2028;
+      padding: 10px;
+      border-radius: 8px;
+    }
+
+    /* Export */
+    .export-btn {
+      margin-top: 12px;
+      width: 100%;
+      padding: 10px;
+      border: none;
+      border-radius: 8px;
+      background: #2d4eff;
+      color: white;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+  </style>
+</head>
+
+<body>
+  <div class="container">
+
+    <h1 id="phone-title">Clinical Copilot</h1>
+    <div id="one-liner" class="empty">Waiting for conversation...</div>
+
+    <div class="tabs">
+      <div class="tab active" data-tab="transcript">Transcript</div>
+      <div class="tab" data-tab="insights">Insights</div>
+      <div class="tab" data-tab="summary">Summary</div>
+    </div>
+
+    <!-- Transcript -->
+    <div id="transcript" class="panel active">
+      <div id="transcript-panel" class="empty">No transcript yet.</div>
+    </div>
+
+    <!-- Insights -->
+    <div id="insights" class="panel">
+      <div id="insights-panel">
+        <div class="empty">No insights yet.</div>
+      </div>
+    </div>
+
+    <!-- Summary -->
+    <div id="summary" class="panel">
+      <div id="summary-title">Clinical Copilot</div>
+      <div id="summary-text" class="empty">Waiting for analysis...</div>
+      <div id="summary-detail">No detailed insight yet.</div>
+
+      <button class="export-btn" onclick="exportData()">Export Session</button>
+    </div>
+
+  </div>
+
+  <script>
+    // Tabs
+    document.querySelectorAll(".tab").forEach(tab => {
+      tab.addEventListener("click", () => {
+        document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+        document.querySelectorAll(".panel").forEach(p => p.classList.remove("active"));
+
+        tab.classList.add("active");
+        document.getElementById(tab.dataset.tab).classList.add("active");
+      });
+    });
+
+    // Export
+    function exportData() {
+      const title = document.getElementById("phone-title")?.textContent || "";
+      const summary = document.getElementById("summary-text")?.textContent || "";
+      const transcript = document.getElementById("transcript-panel")?.textContent || "";
+      const insights = document.getElementById("insights-panel")?.innerText || "";
+
+      const content = `
+=== Clinical Copilot Export ===
+
+TITLE:
+${title}
+
+SUMMARY:
+${summary}
+
+TRANSCRIPT:
+${transcript}
+
+INSIGHTS:
+${insights}
+      `;
+
+      const blob = new Blob([content], { type: "text/plain" });
+      const url = URL.createObjectURL(blob);
+
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "clinical_copilot_session.txt";
+      a.click();
+
+      URL.revokeObjectURL(url);
+    }
+  </script>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
 </html>
