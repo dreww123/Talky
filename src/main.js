@@ -12,11 +12,11 @@ async function init() {
     const sdk = await import("@evenrealities/even_hub_sdk");
     const bridge = await sdk.waitForEvenAppBridge();
 
-    const STORAGE_KEY = "clinical_copilot_v12_transcript_tail";
+    const STORAGE_KEY = "clinical_copilot_v13_transcript_tail";
     const MAX_BUBBLES = 8;
     const VISIBLE_BUBBLES = 3;
     const SAFE_CHAR_LIMIT = 360;
-    const EXPANDED_CHAR_LIMIT = 2200;
+    const EXPANDED_CHAR_LIMIT = 1800; // keep under ER text container limit
     const W = 46;
     const TRANSCRIPT_LINES = 3;
     const MIN_AUDIO_BYTES = 2000;
@@ -42,7 +42,7 @@ async function init() {
 
     let bubbles = [];
     let hoverIndex = "title";
-    let expanded = null;
+    let expanded = null; // null | "title" | number | "exit"
     let expandedSnapshot = null;
     let exitSelection = 1;
 
@@ -56,10 +56,13 @@ async function init() {
       title: null,
       oneLiner: null,
       bubbles: [],
+      liveTranscript: null,
+      committedTranscript: null,
+      fullTranscript: null,
     };
 
-    let renderInFlight = false;
-    let renderQueued = false;
+    let renderScheduled = false;
+    let isRendering = false;
     let lastRenderedText = "";
 
     function setStatus(msg) {
@@ -189,7 +192,6 @@ async function init() {
         if (type === "factcheck") return "Correction";
         return "Insight";
       }
-
       return clean.slice(0, 28);
     }
 
@@ -250,6 +252,10 @@ async function init() {
     function applyPendingUi() {
       if (pendingUi.title) conversationTitle = pendingUi.title;
       if (pendingUi.oneLiner) oneLiner = pendingUi.oneLiner;
+      if (pendingUi.liveTranscript !== null) liveTranscript = pendingUi.liveTranscript;
+      if (pendingUi.committedTranscript !== null)
+        committedTranscript = pendingUi.committedTranscript;
+      if (pendingUi.fullTranscript !== null) fullTranscript = pendingUi.fullTranscript;
 
       for (const b of pendingUi.bubbles) {
         pushBubble(b.type, b.short, b.expanded);
@@ -259,6 +265,9 @@ async function init() {
         title: null,
         oneLiner: null,
         bubbles: [],
+        liveTranscript: null,
+        committedTranscript: null,
+        fullTranscript: null,
       };
     }
 
@@ -327,7 +336,6 @@ async function init() {
           lines.push("");
           const detailLines = wrapText(b.expanded || b.short, W);
           for (const l of detailLines) lines.push(l);
-          lines.push("");
           return lines.join("\n");
         }
       }
@@ -395,7 +403,6 @@ async function init() {
       const safeText =
         text.length > limit ? text.slice(0, limit - 3) + "..." : text;
 
-      // Restore the object-style API that was working before.
       await bridge.textContainerUpgrade({
         containerID: 1,
         containerName: "mainText",
@@ -405,7 +412,7 @@ async function init() {
       });
     }
 
-    async function renderCore() {
+    async function renderNow() {
       const text = buildScreen();
 
       details.textContent =
@@ -428,23 +435,23 @@ async function init() {
     }
 
     function requestRender() {
-      renderQueued = true;
+      renderScheduled = true;
       queueMicrotask(runRenderLoop);
     }
 
     async function runRenderLoop() {
-      if (renderInFlight || !renderQueued) return;
-      renderInFlight = true;
+      if (isRendering || !renderScheduled) return;
+      isRendering = true;
 
       try {
-        while (renderQueued) {
-          renderQueued = false;
-          await renderCore();
+        while (renderScheduled) {
+          renderScheduled = false;
+          await renderNow();
         }
       } catch (err) {
         console.error("Render error:", err);
       } finally {
-        renderInFlight = false;
+        isRendering = false;
       }
     }
 
@@ -520,33 +527,44 @@ async function init() {
             const msg = JSON.parse(event.data);
 
             if (msg.type === "transcript" && msg.text) {
-              liveTranscript = normalizeDisplayText(msg.text);
-              if (expanded === null) requestRender();
+              if (expanded !== null) {
+                pendingUi.liveTranscript = normalizeDisplayText(msg.text);
+              } else {
+                liveTranscript = normalizeDisplayText(msg.text);
+                requestRender();
+              }
             }
 
             if (msg.type === "final_transcript" && msg.text) {
               const finalized = normalizeDisplayText(msg.text);
 
-              committedTranscript = normalizeDisplayText(
+              const nextCommitted = normalizeDisplayText(
                 committedTranscript
                   ? `${committedTranscript} ${finalized}`
                   : finalized
               );
 
-              committedTranscript = clampTail(
-                committedTranscript,
+              const clampedCommitted = clampTail(
+                nextCommitted,
                 TRANSCRIPT_RENDER_CAP,
                 TRANSCRIPT_KEEP_TAIL
               );
 
-              fullTranscript =
+              const nextFullTranscript =
                 normalizeDisplayText(msg.fullText) ||
-                committedTranscript ||
+                clampedCommitted ||
                 fullTranscript;
 
-              liveTranscript = "";
-
-              if (expanded === null) requestRender();
+              if (expanded !== null) {
+                pendingUi.committedTranscript = clampedCommitted;
+                pendingUi.fullTranscript = nextFullTranscript;
+                pendingUi.liveTranscript = "";
+              } else {
+                committedTranscript = clampedCommitted;
+                fullTranscript = nextFullTranscript;
+                liveTranscript = "";
+                requestRender();
+              }
             }
 
             if (msg.type === "analysis") {
