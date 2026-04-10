@@ -18,77 +18,116 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 // ───────────────────────────────────────────────────────────────────────────────
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
 const ANALYZE_MODEL = process.env.OPENAI_ANALYZE_MODEL || "gpt-4o-mini";
-const MAX_HISTORY_TURNS = Number(process.env.MAX_HISTORY_TURNS) || 28;
+const MAX_HISTORY_TURNS = Number(process.env.MAX_HISTORY_TURNS) || 24;
 const SESSION_TTL_MS = 1000 * 60 * 60 * 3;
 
 const ANALYSIS_INTERVAL_MS = Number(process.env.ANALYSIS_INTERVAL_MS) || 4500;
 const MIN_NEW_CHARS_FOR_ANALYSIS =
-  Number(process.env.MIN_NEW_CHARS_FOR_ANALYSIS) || 45;
+  Number(process.env.MIN_NEW_CHARS_FOR_ANALYSIS) || 55;
 
 const SECRET_TOKEN = process.env.SECRET_TOKEN;
 
-// gating
-const MIN_PRIORITY_TO_SURFACE = Number(
-  process.env.MIN_PRIORITY_TO_SURFACE ?? 74
-);
-const MIN_CONFIDENCE_TO_SURFACE = Number(
-  process.env.MIN_CONFIDENCE_TO_SURFACE ?? 0.76
+// Deepgram vocab boosting
+const DEEPGRAM_MODEL = process.env.DEEPGRAM_MODEL || "nova-3-medical";
+const DEEPGRAM_LANGUAGE = process.env.DEEPGRAM_LANGUAGE || "en-US";
+const DEEPGRAM_ENCODING = process.env.DEEPGRAM_ENCODING || "linear16";
+const DEEPGRAM_SAMPLE_RATE = Number(process.env.DEEPGRAM_SAMPLE_RATE) || 16000;
+const DEEPGRAM_CHANNELS = Number(process.env.DEEPGRAM_CHANNELS) || 1;
+const DEEPGRAM_ENDPOINTING = Number(process.env.DEEPGRAM_ENDPOINTING) || 300;
+const DEEPGRAM_UTTERANCE_END_MS =
+  Number(process.env.DEEPGRAM_UTTERANCE_END_MS) || 1000;
+const DEEPGRAM_SMART_FORMAT = String(
+  process.env.DEEPGRAM_SMART_FORMAT ?? "true"
+).toLowerCase() === "true";
+const DEEPGRAM_PUNCTUATE = String(
+  process.env.DEEPGRAM_PUNCTUATE ?? "true"
+).toLowerCase() === "true";
+const DEEPGRAM_INTERIM_RESULTS = String(
+  process.env.DEEPGRAM_INTERIM_RESULTS ?? "true"
+).toLowerCase() === "true";
+
+// Comma-separated in Railway, e.g.
+// DEEPGRAM_KEYTERMS=ADEM,IL2R,oligoclonal bands,MOGAD,NMOSD
+const DEEPGRAM_KEYTERMS_MAX = Number(
+  process.env.DEEPGRAM_KEYTERMS_MAX ?? 100
 );
 
-const ANSWER_MIN_PRIORITY = Number(process.env.ANSWER_MIN_PRIORITY ?? 60);
+// Global gating
+const MIN_PRIORITY_TO_SURFACE = Number(
+  process.env.MIN_PRIORITY_TO_SURFACE ?? 72
+);
+const MIN_CONFIDENCE_TO_SURFACE = Number(
+  process.env.MIN_CONFIDENCE_TO_SURFACE ?? 0.74
+);
+
+// Per-mode gating
+const ANSWER_MIN_PRIORITY = Number(process.env.ANSWER_MIN_PRIORITY ?? 58);
 const ANSWER_MIN_CONFIDENCE = Number(
-  process.env.ANSWER_MIN_CONFIDENCE ?? 0.62
+  process.env.ANSWER_MIN_CONFIDENCE ?? 0.6
 );
 
 const FACTCHECK_MIN_PRIORITY = Number(
-  process.env.FACTCHECK_MIN_PRIORITY ?? 84
+  process.env.FACTCHECK_MIN_PRIORITY ?? 86
 );
 const FACTCHECK_MIN_CONFIDENCE = Number(
-  process.env.FACTCHECK_MIN_CONFIDENCE ?? 0.88
+  process.env.FACTCHECK_MIN_CONFIDENCE ?? 0.9
 );
 
 const CLINICAL_QUESTION_MIN_PRIORITY = Number(
-  process.env.CLINICAL_QUESTION_MIN_PRIORITY ?? 76
+  process.env.CLINICAL_QUESTION_MIN_PRIORITY ?? 88
 );
 const CLINICAL_QUESTION_MIN_CONFIDENCE = Number(
-  process.env.CLINICAL_QUESTION_MIN_CONFIDENCE ?? 0.74
+  process.env.CLINICAL_QUESTION_MIN_CONFIDENCE ?? 0.84
 );
 
 const COMMENTARY_MIN_PRIORITY = Number(
-  process.env.COMMENTARY_MIN_PRIORITY ?? 78
+  process.env.COMMENTARY_MIN_PRIORITY ?? 70
 );
 const COMMENTARY_MIN_CONFIDENCE = Number(
-  process.env.COMMENTARY_MIN_CONFIDENCE ?? 0.78
+  process.env.COMMENTARY_MIN_CONFIDENCE ?? 0.72
 );
 
 const TEACHING_MIN_PRIORITY = Number(
-  process.env.TEACHING_MIN_PRIORITY ?? 80
+  process.env.TEACHING_MIN_PRIORITY ?? 78
 );
 const TEACHING_MIN_CONFIDENCE = Number(
   process.env.TEACHING_MIN_CONFIDENCE ?? 0.8
 );
 
 const REFERENCE_MIN_PRIORITY = Number(
-  process.env.REFERENCE_MIN_PRIORITY ?? 68
+  process.env.REFERENCE_MIN_PRIORITY ?? 66
 );
 const REFERENCE_MIN_CONFIDENCE = Number(
   process.env.REFERENCE_MIN_CONFIDENCE ?? 0.68
 );
 
+// Similarity / suppression
 const BUBBLE_SIMILARITY_THRESHOLD = Number(
   process.env.BUBBLE_SIMILARITY_THRESHOLD ?? 0.66
 );
-
 const LABEL_SIMILARITY_THRESHOLD = Number(
   process.env.LABEL_SIMILARITY_THRESHOLD ?? 0.82
 );
-
 const TRANSCRIPT_OVERLAP_SUPPRESSION_THRESHOLD = Number(
   process.env.TRANSCRIPT_OVERLAP_SUPPRESSION_THRESHOLD ?? 0.72
 );
 
-const MODE_COOLDOWN_MS = Number(process.env.MODE_COOLDOWN_MS) || 12000;
-const TOPIC_COOLDOWN_MS = Number(process.env.TOPIC_COOLDOWN_MS) || 90000;
+// Cooldowns
+const GENERAL_MODE_COOLDOWN_MS = Number(
+  process.env.GENERAL_MODE_COOLDOWN_MS ?? 12000
+);
+const CLINICAL_QUESTION_MODE_COOLDOWN_MS = Number(
+  process.env.CLINICAL_QUESTION_MODE_COOLDOWN_MS ?? 30000
+);
+const TOPIC_COOLDOWN_MS = Number(process.env.TOPIC_COOLDOWN_MS ?? 90000);
+
+// Early presentation suppression
+const EARLY_PRESENTATION_TURN_LIMIT = Number(
+  process.env.EARLY_PRESENTATION_TURN_LIMIT ?? 3
+);
+const EARLY_PRESENTATION_CHAR_LIMIT = Number(
+  process.env.EARLY_PRESENTATION_CHAR_LIMIT ?? 260
+);
 
 // ───────────────────────────────────────────────────────────────────────────────
 // Express
@@ -116,6 +155,8 @@ app.get("/health", (_req, res) => {
     ok: true,
     service: "talky-clinical-copilot",
     sessions: sessions.size,
+    deepgram_model: DEEPGRAM_MODEL,
+    deepgram_keyterms_count: getDeepgramKeyterms().length,
   });
 });
 
@@ -150,20 +191,26 @@ app.use((req, res, next) => {
 // ───────────────────────────────────────────────────────────────────────────────
 const sessions = new Map();
 
+function createSession(id) {
+  return {
+    id,
+    turns: [],
+    oneLiner: "",
+    title: "Talky",
+    shownBubbles: [],
+    surfacedTopicKeys: [],
+    surfacedModes: [],
+    caseIndex: 1,
+    lastActiveAt: Date.now(),
+    lastSurfacedExpanded: "",
+    lastSurfacedLabel: "",
+    currentCaseStartedAt: Date.now(),
+  };
+}
+
 function getSession(id = "default") {
   if (!sessions.has(id)) {
-    sessions.set(id, {
-      id,
-      turns: [],
-      oneLiner: "",
-      title: "Talky",
-      shownBubbles: [],
-      surfacedTopicKeys: [],
-      surfacedModes: [],
-      lastActiveAt: Date.now(),
-      lastSurfacedExpanded: "",
-      lastSurfacedLabel: "",
-    });
+    sessions.set(id, createSession(id));
   }
 
   const session = sessions.get(id);
@@ -171,22 +218,30 @@ function getSession(id = "default") {
   return session;
 }
 
-function addTurn(session, text) {
-  const clean = normalizeWS(text);
-  if (!clean) return;
+function resetCaseState(session, { hard = false } = {}) {
+  session.turns = [];
+  session.oneLiner = "";
+  session.title = "Talky";
+  session.lastSurfacedExpanded = "";
+  session.lastSurfacedLabel = "";
+  session.currentCaseStartedAt = Date.now();
+  session.caseIndex += 1;
 
-  session.turns.push({
-    text: clean,
-    ts: Date.now(),
-  });
+  session.surfacedTopicKeys = [];
+  session.surfacedModes = [];
 
-  if (session.turns.length > MAX_HISTORY_TURNS) {
-    session.turns = session.turns.slice(-MAX_HISTORY_TURNS);
+  if (hard) {
+    session.shownBubbles = [];
   }
 }
 
 function buildWindow(session) {
   return session.turns.map((t) => t.text).join("\n");
+}
+
+function buildRecentContext(session, maxTurns = 8) {
+  const turns = session.turns.slice(-maxTurns);
+  return turns.map((t) => t.text).join("\n");
 }
 
 function rememberSurfacedBubble(session, entry) {
@@ -317,22 +372,35 @@ function normalizeMode(mode) {
   return allowed.has(m) ? m : "none";
 }
 
-function modeRank(mode) {
-  switch (mode) {
-    case "answer":
-      return 6;
-    case "fact_check":
-      return 5;
-    case "clinical_question":
-      return 4;
-    case "commentary":
-      return 3;
+function frontendCategoryToMode(category) {
+  switch (String(category || "").toLowerCase().trim()) {
+    case "question":
+      return "answer";
+    case "factcheck":
+      return "fact_check";
     case "reference":
-      return 2;
-    case "teaching":
-      return 1;
+      return "reference";
+    case "insight":
+      return "commentary";
     default:
-      return 0;
+      return "commentary";
+  }
+}
+
+function modeToFrontendCategory(mode) {
+  switch (normalizeMode(mode)) {
+    case "answer":
+      return "question";
+    case "fact_check":
+      return "factcheck";
+    case "reference":
+      return "reference";
+    case "clinical_question":
+    case "commentary":
+    case "teaching":
+      return "insight";
+    default:
+      return "none";
   }
 }
 
@@ -403,42 +471,9 @@ function extractBubbleEntries(input) {
     .slice(0, 20);
 }
 
-function frontendCategoryToMode(category) {
-  switch (String(category || "").toLowerCase().trim()) {
-    case "question":
-      return "answer";
-    case "factcheck":
-      return "fact_check";
-    case "reference":
-      return "reference";
-    case "insight":
-      return "commentary";
-    default:
-      return "commentary";
-  }
-}
-
-function modeToFrontendCategory(mode) {
-  switch (normalizeMode(mode)) {
-    case "answer":
-      return "question";
-    case "fact_check":
-      return "factcheck";
-    case "reference":
-      return "reference";
-    case "clinical_question":
-    case "commentary":
-    case "teaching":
-      return "insight";
-    default:
-      return "none";
-  }
-}
-
 function makeLabelForMode(mode, label, title) {
   const cleanLabel = normalizeFlat(label);
   const cleanTitle = normalizeFlat(title);
-
   const base = cleanLabel || cleanTitle || "";
 
   if (!base) {
@@ -501,6 +536,32 @@ function bodyLooksGeneric(text) {
   return genericPatterns.some((p) => clean.includes(p));
 }
 
+function looksLikeRoutineQuestion(body) {
+  const clean = normalizeFlat(body).toLowerCase();
+
+  const routineQuestionPatterns = [
+    "what did the exam show",
+    "what was the exam",
+    "what is the family history",
+    "what's the family history",
+    "what medications",
+    "what meds",
+    "what was the imaging",
+    "what did imaging show",
+    "what labs showed",
+    "what were the labs",
+    "what was the blood pressure",
+    "what was the exam finding",
+    "what is the exam finding",
+    "what is the history",
+    "what was the history",
+    "what did the mri show",
+    "what did the ct show",
+  ];
+
+  return routineQuestionPatterns.some((p) => clean.includes(p));
+}
+
 function transcriptOverlapTooHigh(body, recentTranscript, transcriptWindow) {
   const compareA = normalizeFlat(recentTranscript || "");
   const compareB = normalizeFlat(transcriptWindow || "");
@@ -511,7 +572,10 @@ function transcriptOverlapTooHigh(body, recentTranscript, transcriptWindow) {
   const simRecent = jaccardSimilarity(cleanBody, compareA);
   const simWindow = jaccardSimilarity(cleanBody, compareB);
 
-  return Math.max(simRecent, simWindow) >= TRANSCRIPT_OVERLAP_SUPPRESSION_THRESHOLD;
+  return (
+    Math.max(simRecent, simWindow) >=
+    TRANSCRIPT_OVERLAP_SUPPRESSION_THRESHOLD
+  );
 }
 
 function findNearDuplicate(body, label, history) {
@@ -519,9 +583,7 @@ function findNearDuplicate(body, label, history) {
   const cleanLabel = normalizeFlat(label);
 
   for (const h of history || []) {
-    const textSim = cleanBody
-      ? jaccardSimilarity(cleanBody, h?.text || "")
-      : 0;
+    const textSim = cleanBody ? jaccardSimilarity(cleanBody, h?.text || "") : 0;
     const labelSim = cleanLabel
       ? jaccardSimilarity(cleanLabel, h?.label || "")
       : 0;
@@ -552,8 +614,13 @@ function modeRecentlySurfaced(session, mode) {
   if (!clean || clean === "none") return false;
 
   const now = Date.now();
+  const cooldown =
+    clean === "clinical_question"
+      ? CLINICAL_QUESTION_MODE_COOLDOWN_MS
+      : GENERAL_MODE_COOLDOWN_MS;
+
   return (session.surfacedModes || []).some(
-    (m) => m.mode === clean && now - m.ts < MODE_COOLDOWN_MS
+    (m) => m.mode === clean && now - m.ts < cooldown
   );
 }
 
@@ -577,9 +644,112 @@ function recentHistoryForPrompt(session, bubbles = []) {
   return out;
 }
 
-function buildRecentContext(session, maxTurns = 8) {
-  const turns = session.turns.slice(-maxTurns);
-  return turns.map((t) => t.text).join("\n");
+function isLikelyEarlyPresentation(session, recentTranscript = "") {
+  const turnCount = session.turns.length;
+  const totalChars = buildWindow(session).length;
+  const recent = normalizeFlat(recentTranscript).toLowerCase();
+
+  const oneLinerPatterns = [
+    /\b\d{1,3}\s*(year|yo)\b/,
+    /\bwith a history of\b/,
+    /\bpresented with\b/,
+    /\bhere with\b/,
+    /\bcoming in with\b/,
+    /\badmitted for\b/,
+    /\btransferred for\b/,
+    /\bthis is a\b/,
+    /\bone[- ]liner\b/,
+    /\bhandoff\b/,
+    /\bsign[- ]out\b/,
+  ];
+
+  const soundsLikeOneLiner = oneLinerPatterns.some((re) => re.test(recent));
+
+  return (
+    turnCount <= EARLY_PRESENTATION_TURN_LIMIT ||
+    totalChars <= EARLY_PRESENTATION_CHAR_LIMIT ||
+    soundsLikeOneLiner
+  );
+}
+
+function looksLikeCaseBoundary(text, session) {
+  const clean = normalizeFlat(text).toLowerCase();
+  if (!clean) return false;
+
+  if (session.turns.length < 2 && buildWindow(session).length < 180) {
+    return false;
+  }
+
+  const strongBoundaryPatterns = [
+    /\bnext patient\b/,
+    /\banother patient\b/,
+    /\bmoving on\b/,
+    /\bmoving along\b/,
+    /\bnew patient\b/,
+    /\bnew consult\b/,
+    /\bnext consult\b/,
+    /\bfor the next one\b/,
+    /\bon to the next\b/,
+    /\bnext case\b/,
+    /\broom\s+\d+\b/,
+    /\bbed\s+\d+\b/,
+    /\bpatient number\b/,
+  ];
+
+  if (strongBoundaryPatterns.some((re) => re.test(clean))) {
+    return true;
+  }
+
+  const priorChars = buildWindow(session).length;
+  const likelyNewPresentation =
+    /\b\d{1,3}\s*(year|yo)\b/.test(clean) &&
+    (/\bmale\b/.test(clean) ||
+      /\bfemale\b/.test(clean) ||
+      /\bman\b/.test(clean) ||
+      /\bwoman\b/.test(clean)) &&
+    (/\bwith\b/.test(clean) ||
+      /\bpresented\b/.test(clean) ||
+      /\bhere for\b/.test(clean) ||
+      /\badmitted\b/.test(clean));
+
+  if (priorChars > 450 && likelyNewPresentation) {
+    return true;
+  }
+
+  return false;
+}
+
+function addTurn(session, text) {
+  const clean = normalizeWS(text);
+  if (!clean) {
+    return { boundaryDetected: false };
+  }
+
+  let boundaryDetected = false;
+
+  if (looksLikeCaseBoundary(clean, session)) {
+    resetCaseState(session);
+    boundaryDetected = true;
+  }
+
+  session.turns.push({
+    text: clean,
+    ts: Date.now(),
+  });
+
+  if (session.turns.length > MAX_HISTORY_TURNS) {
+    session.turns = session.turns.slice(-MAX_HISTORY_TURNS);
+  }
+
+  return { boundaryDetected };
+}
+
+function getDeepgramKeyterms() {
+  return String(process.env.DEEPGRAM_KEYTERMS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .slice(0, DEEPGRAM_KEYTERMS_MAX);
 }
 
 // Compact model schema → compatibility schema for current frontend
@@ -592,7 +762,7 @@ function normalizeAnalysis(parsed) {
       title: "Talky",
       one_liner: "",
       bubble_label: "",
-      question_detected: true,
+      question_detected: false,
       answer: "",
       answer_expanded: "",
       insight: "",
@@ -621,17 +791,18 @@ function normalizeAnalysis(parsed) {
   const topicKey = normalizeTopicKey(parsed.topic_key || "");
 
   const thresholds = getModeThresholds(mode);
-
   const globalPass =
     priority >= MIN_PRIORITY_TO_SURFACE &&
     confidence >= MIN_CONFIDENCE_TO_SURFACE;
-
   const modePass =
     priority >= thresholds.minPriority &&
     confidence >= thresholds.minConfidence;
 
   const shouldSurface =
-    mode !== "none" && !!body && !bodyLooksGeneric(body) && (modePass || (mode === "answer" && globalPass));
+    mode !== "none" &&
+    !!body &&
+    !bodyLooksGeneric(body) &&
+    (modePass || (mode === "answer" && globalPass));
 
   const frontendCategory = shouldSurface ? modeToFrontendCategory(mode) : "none";
   const bubbleLabel = shouldSurface ? makeLabelForMode(mode, rawLabel, title) : "";
@@ -666,6 +837,7 @@ function buildPrompt({
   priorTitle,
   recentContext,
   previousBubbles,
+  earlyPresentation,
 }) {
   const bubbleHistory = previousBubbles?.length
     ? previousBubbles
@@ -683,24 +855,29 @@ function buildPrompt({
   return `You are Talky, an elite real-time neurologic clinical copilot embedded in smart glasses worn by a vascular neurologist.
 
 IDENTITY
-- Think like a world-renowned neurologist silently listening at bedside, table rounds, consult rounds, conference, clinic, or stroke alert.
-- Your job is NOT to summarize the transcript.
-- Your job is to add the single most useful thought that would actually help in the moment.
+- Think like a world-renowned neurologist silently listening during bedside rounds, table rounds, handoff, consults, stroke alerts, and teaching.
+- Your job is NOT to summarize what was said.
+- Your job is to add the single most useful thought in the moment.
 
 WHO YOU ARE HELPING
 - The wearer is already a neurologist.
 - Do not explain basic concepts.
-- Do not give textbook filler.
-- Do not pad.
+- Do not use textbook filler.
 - Be concise, sharp, and high-yield.
 
 PRIORITY ORDER
 1. Answer a direct question asked aloud.
-2. Correct a medically false or unsafe statement if confidence is high.
-3. Ask ONE high-yield clinical question that would materially change diagnosis or management.
-4. Provide concise diagnostic or management commentary if there is a strong lean with a lock-in discriminator.
-5. Provide a short teaching pearl only if it is genuinely useful and niche.
+2. Correct a materially false or unsafe statement if confidence is high.
+3. Provide concise commentary if there is a strong attending-level diagnostic or management angle.
+4. Ask ONE high-yield clinical question only if it is truly decision-critical and NOT just part of the normal presentation flow.
+5. Provide a short niche teaching pearl only if genuinely useful.
 6. Otherwise return none.
+
+IMPORTANT BEHAVIOR
+- During early handoff / initial one-liner, do NOT ask routine presentation questions like exam, family history, imaging, medications, labs, or basic history. Those are often about to be presented anyway.
+- In early presentation, prefer none unless there is a direct question, a strong commentary point, or a clear fact correction.
+- Prefer commentary over generic data-gathering questions.
+- A clinical question should only appear when one missing discriminator would materially change diagnosis or management right now.
 
 YOUR MODES
 - answer
@@ -714,9 +891,9 @@ YOUR MODES
 MODE DEFINITIONS
 - answer: someone directly asked a question aloud and you can answer it.
 - fact_check: the speaker said something materially incorrect, misleading, or unsafe.
-- clinical_question: ask exactly one missing question whose answer would significantly move the case.
-- commentary: your best high-value attending-level interpretation or next discriminator.
-- teaching: short niche pearl only when truly useful.
+- clinical_question: ask exactly one missing question whose answer would significantly move the case right now.
+- commentary: high-value attending-level interpretation, diagnostic lean, risk, pitfall, or lock-in discriminator.
+- teaching: short niche pearl only when actually useful.
 - reference: brief protocol/detail lookup when explicitly asked for a reference-style fact.
 - none: nothing worth surfacing.
 
@@ -725,13 +902,12 @@ STRICT RULES
 - Do not restate the transcript.
 - Do not paraphrase what was already said unless correcting it.
 - Do not generate generic suggestions.
-- Do not say "consider more workup" unless you specify exactly why it matters now.
+- Do not ask routine presentation questions.
 - If asking a clinical question, ask only ONE question.
-- If providing commentary, include the strongest reason and what would lock it in or move it.
-- If fact checking, be very careful and only do it when confidence is high.
+- If providing commentary, include the strongest reason and what would lock it in, change urgency, or materially alter management.
+- Fact checking should be rare and high-confidence.
 - Avoid repeating recent surfaced items even if worded differently.
-- Teaching pearls should be short and niche, not basic definitions.
-- Do not output more than one idea.
+- Teaching pearls should be niche, not basic.
 
 OUTPUT JSON ONLY
 Return ONLY valid JSON with this exact schema:
@@ -741,31 +917,13 @@ Return ONLY valid JSON with this exact schema:
   "confidence": 0.0-1.0,
   "title": "2-5 words",
   "label": "very short topic label, 1-4 words",
-  "body": "1-4 dense sentences, usually 35-140 words, no filler",
-  "summary": "rolling 1-4 sentence conversation summary for UI context",
+  "body": "1-4 dense sentences, usually 30-120 words, no filler",
+  "summary": "rolling 1-4 sentence conversation summary for the CURRENT patient/case only",
   "topic_key": "stable short slug for the core idea"
 }
 
-SCORING GUIDANCE
-- answer should usually have the highest priority if a real question was asked.
-- fact_check should be rare and high-confidence.
-- commentary should only fire if it is genuinely additive.
-- teaching should be less preferred than answer, fact_check, clinical_question, and commentary.
-- none is the correct choice very often.
-
-GOOD BEHAVIOR EXAMPLES
-- If they ask: "What findings suggest MMN rather than ALS?" -> answer directly.
-- If they mention CSF pleocytosis in a neuroinflammatory case -> maybe ask whether it is lymphocytic vs neutrophilic if that would truly move the differential.
-- If the conversation strongly fits ADEM vs MS -> commentary can say why and what locks it in.
-- If someone states an actually incorrect medical claim -> fact_check, but only if confidence is high.
-
-BAD BEHAVIOR
-- repeating history that was already spoken
-- generic next steps
-- generic definitions
-- filler teaching
-- multiple questions
-- broad low-yield differentials
+CURRENT STATE
+- early_presentation = ${earlyPresentation ? "true" : "false"}
 
 PREVIOUS SURFACED ITEMS (do not repeat conceptually):
 ${bubbleHistory}
@@ -779,7 +937,7 @@ ${priorSummary || "none"}
 RECENT CONTEXT WINDOW:
 ${recentContext || "none"}
 
-FULL TRANSCRIPT WINDOW:
+FULL TRANSCRIPT WINDOW FOR CURRENT CASE ONLY:
 ${transcriptWindow || "none"}
 
 MOST RECENT TRANSCRIPT:
@@ -795,6 +953,7 @@ async function analyzeTranscript({
   priorTitle,
   recentContext,
   previousBubbles,
+  earlyPresentation,
 }) {
   const prompt = buildPrompt({
     recentTranscript: clamp(recentTranscript, 4500),
@@ -803,6 +962,7 @@ async function analyzeTranscript({
     priorTitle: clamp(priorTitle || "", 120),
     recentContext: clamp(recentContext || "", 5000),
     previousBubbles: previousBubbles || [],
+    earlyPresentation: !!earlyPresentation,
   });
 
   const response = await openai.chat.completions.create({
@@ -812,7 +972,10 @@ async function analyzeTranscript({
     response_format: { type: "json_object" },
     messages: [
       { role: "system", content: prompt },
-      { role: "user", content: "Analyze the live conversation and return JSON only." },
+      {
+        role: "user",
+        content: "Analyze the live conversation and return JSON only.",
+      },
     ],
   });
 
@@ -832,6 +995,7 @@ function shouldSuppressAnalysis({
   priorHistory,
   recentTranscript,
   transcriptWindow,
+  earlyPresentation,
 }) {
   if (!analyzed || analyzed.mode === "none") {
     return { suppress: true, reason: "none" };
@@ -892,6 +1056,15 @@ function shouldSuppressAnalysis({
     return { suppress: true, reason: "too_close_to_transcript" };
   }
 
+  if (mode === "clinical_question") {
+    if (earlyPresentation) {
+      return { suppress: true, reason: "early_presentation_question" };
+    }
+    if (looksLikeRoutineQuestion(body)) {
+      return { suppress: true, reason: "routine_question" };
+    }
+  }
+
   return { suppress: false, reason: "" };
 }
 
@@ -905,19 +1078,29 @@ function openDeepgramSocket() {
       return;
     }
 
-    const url = [
-      "wss://api.deepgram.com/v1/listen",
-      "?model=nova-3-medical",
-      "&language=en-US",
-      "&encoding=linear16",
-      "&sample_rate=16000",
-      "&channels=1",
-      "&interim_results=true",
-      "&utterance_end_ms=2000",
-      "&punctuate=true",
-      "&smart_format=true",
-      "&endpointing=300",
-    ].join("");
+    const params = new URLSearchParams({
+      model: DEEPGRAM_MODEL,
+      language: DEEPGRAM_LANGUAGE,
+      encoding: DEEPGRAM_ENCODING,
+      sample_rate: String(DEEPGRAM_SAMPLE_RATE),
+      channels: String(DEEPGRAM_CHANNELS),
+      interim_results: String(DEEPGRAM_INTERIM_RESULTS),
+      utterance_end_ms: String(DEEPGRAM_UTTERANCE_END_MS),
+      punctuate: String(DEEPGRAM_PUNCTUATE),
+      smart_format: String(DEEPGRAM_SMART_FORMAT),
+      endpointing: String(DEEPGRAM_ENDPOINTING),
+    });
+
+    const keyterms = getDeepgramKeyterms();
+    for (const term of keyterms) {
+      params.append("keyterm", term);
+    }
+
+    const url = `wss://api.deepgram.com/v1/listen?${params.toString()}`;
+
+    console.log(
+      `Deepgram config: model=${DEEPGRAM_MODEL}, keyterms=${keyterms.length}, punctuate=${DEEPGRAM_PUNCTUATE}, smart_format=${DEEPGRAM_SMART_FORMAT}`
+    );
 
     const dg = new WebSocket(url, {
       headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` },
@@ -945,7 +1128,7 @@ function openDeepgramSocket() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
-// Client WebSocket handler
+// WebSocket handler
 // ───────────────────────────────────────────────────────────────────────────────
 wss.on("connection", async (clientWs, req) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
@@ -961,8 +1144,11 @@ wss.on("connection", async (clientWs, req) => {
 
   let dgSocket = null;
   let sessionId = "default";
+
+  // Current case only
   let accumulatedText = "";
   let lastAnalyzedLen = 0;
+
   let analysisTimer = null;
   let isAnalyzing = false;
   let isStopped = false;
@@ -994,6 +1180,10 @@ wss.on("connection", async (clientWs, req) => {
       const transcriptWindow = buildWindow(session);
       const recentContext = buildRecentContext(session, 8);
       const priorHistory = recentHistoryForPrompt(session, bubbles);
+      const earlyPresentation = isLikelyEarlyPresentation(
+        session,
+        accumulatedText
+      );
 
       const analyzed = await analyzeTranscript({
         recentTranscript: accumulatedText,
@@ -1002,6 +1192,7 @@ wss.on("connection", async (clientWs, req) => {
         priorSummary: session.oneLiner,
         priorTitle: session.title,
         previousBubbles: priorHistory,
+        earlyPresentation,
       });
 
       if (analyzed.title) session.title = analyzed.title;
@@ -1013,6 +1204,7 @@ wss.on("connection", async (clientWs, req) => {
         priorHistory,
         recentTranscript: accumulatedText,
         transcriptWindow,
+        earlyPresentation,
       });
 
       if (suppression.suppress) {
@@ -1021,7 +1213,10 @@ wss.on("connection", async (clientWs, req) => {
         sendJson({
           type: "analysis",
           title: session.title || analyzed.title || "Talky",
-          one_liner: analyzed.one_liner || session.oneLiner || "Conversation in progress",
+          one_liner:
+            analyzed.one_liner ||
+            session.oneLiner ||
+            "Conversation in progress",
           bubble_label: "",
           question_detected: false,
           answer: "",
@@ -1039,7 +1234,8 @@ wss.on("connection", async (clientWs, req) => {
 
       lastAnalyzedLen = accumulatedText.length;
 
-      const surfaced = analyzed.answer_expanded || analyzed.insight_expanded || "";
+      const surfaced =
+        analyzed.answer_expanded || analyzed.insight_expanded || "";
       const surfacedLabel =
         analyzed.answer || analyzed.insight || analyzed.bubble_label || "";
 
@@ -1106,16 +1302,23 @@ wss.on("connection", async (clientWs, req) => {
       if (!transcript) return;
 
       if (msg.is_final) {
-        accumulatedText = normalizeWS(
-          accumulatedText ? `${accumulatedText} ${transcript}` : transcript
-        );
+        const session = getSession(sessionId);
+        const { boundaryDetected } = addTurn(session, transcript);
 
-        addTurn(getSession(sessionId), transcript);
+        if (boundaryDetected) {
+          accumulatedText = normalizeWS(transcript);
+          lastAnalyzedLen = 0;
+        } else {
+          accumulatedText = normalizeWS(
+            accumulatedText ? `${accumulatedText} ${transcript}` : transcript
+          );
+        }
 
         sendJson({
           type: "final_transcript",
           text: transcript,
           fullText: accumulatedText,
+          new_case: boundaryDetected,
         });
       } else {
         sendJson({
@@ -1224,4 +1427,7 @@ server.listen(port, "0.0.0.0", () => {
     `OpenAI: ${process.env.OPENAI_API_KEY ? "configured" : "MISSING KEY"}`
   );
   console.log(`Secret token: ${SECRET_TOKEN ? "configured" : "MISSING TOKEN"}`);
+  console.log(
+    `Deepgram keyterms loaded: ${getDeepgramKeyterms().length || 0}`
+  );
 });
