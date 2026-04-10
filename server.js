@@ -18,28 +18,81 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 // ───────────────────────────────────────────────────────────────────────────────
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
 const ANALYZE_MODEL = process.env.OPENAI_ANALYZE_MODEL || "gpt-4o-mini";
-const MAX_HISTORY_TURNS = Number(process.env.MAX_HISTORY_TURNS) || 20;
+const MAX_HISTORY_TURNS = Number(process.env.MAX_HISTORY_TURNS) || 28;
 const SESSION_TTL_MS = 1000 * 60 * 60 * 3;
 
-// Faster refresh for live medical conversations
-const ANALYSIS_INTERVAL_MS = Number(process.env.ANALYSIS_INTERVAL_MS) || 5000;
+const ANALYSIS_INTERVAL_MS = Number(process.env.ANALYSIS_INTERVAL_MS) || 4500;
 const MIN_NEW_CHARS_FOR_ANALYSIS =
-  Number(process.env.MIN_NEW_CHARS_FOR_ANALYSIS) || 35;
+  Number(process.env.MIN_NEW_CHARS_FOR_ANALYSIS) || 45;
 
+const SECRET_TOKEN = process.env.SECRET_TOKEN;
+
+// gating
+const MIN_PRIORITY_TO_SURFACE = Number(
+  process.env.MIN_PRIORITY_TO_SURFACE ?? 74
+);
 const MIN_CONFIDENCE_TO_SURFACE = Number(
-  process.env.MIN_CONFIDENCE_TO_SURFACE ?? 0.78
+  process.env.MIN_CONFIDENCE_TO_SURFACE ?? 0.76
 );
 
-const QUESTION_CONFIDENCE_TO_SURFACE = Number(
-  process.env.QUESTION_CONFIDENCE_TO_SURFACE ?? 0.62
+const ANSWER_MIN_PRIORITY = Number(process.env.ANSWER_MIN_PRIORITY ?? 60);
+const ANSWER_MIN_CONFIDENCE = Number(
+  process.env.ANSWER_MIN_CONFIDENCE ?? 0.62
+);
+
+const FACTCHECK_MIN_PRIORITY = Number(
+  process.env.FACTCHECK_MIN_PRIORITY ?? 84
+);
+const FACTCHECK_MIN_CONFIDENCE = Number(
+  process.env.FACTCHECK_MIN_CONFIDENCE ?? 0.88
+);
+
+const CLINICAL_QUESTION_MIN_PRIORITY = Number(
+  process.env.CLINICAL_QUESTION_MIN_PRIORITY ?? 76
+);
+const CLINICAL_QUESTION_MIN_CONFIDENCE = Number(
+  process.env.CLINICAL_QUESTION_MIN_CONFIDENCE ?? 0.74
+);
+
+const COMMENTARY_MIN_PRIORITY = Number(
+  process.env.COMMENTARY_MIN_PRIORITY ?? 78
+);
+const COMMENTARY_MIN_CONFIDENCE = Number(
+  process.env.COMMENTARY_MIN_CONFIDENCE ?? 0.78
+);
+
+const TEACHING_MIN_PRIORITY = Number(
+  process.env.TEACHING_MIN_PRIORITY ?? 80
+);
+const TEACHING_MIN_CONFIDENCE = Number(
+  process.env.TEACHING_MIN_CONFIDENCE ?? 0.8
+);
+
+const REFERENCE_MIN_PRIORITY = Number(
+  process.env.REFERENCE_MIN_PRIORITY ?? 68
+);
+const REFERENCE_MIN_CONFIDENCE = Number(
+  process.env.REFERENCE_MIN_CONFIDENCE ?? 0.68
 );
 
 const BUBBLE_SIMILARITY_THRESHOLD = Number(
   process.env.BUBBLE_SIMILARITY_THRESHOLD ?? 0.66
 );
 
-const SECRET_TOKEN = process.env.SECRET_TOKEN;
+const LABEL_SIMILARITY_THRESHOLD = Number(
+  process.env.LABEL_SIMILARITY_THRESHOLD ?? 0.82
+);
 
+const TRANSCRIPT_OVERLAP_SUPPRESSION_THRESHOLD = Number(
+  process.env.TRANSCRIPT_OVERLAP_SUPPRESSION_THRESHOLD ?? 0.72
+);
+
+const MODE_COOLDOWN_MS = Number(process.env.MODE_COOLDOWN_MS) || 12000;
+const TOPIC_COOLDOWN_MS = Number(process.env.TOPIC_COOLDOWN_MS) || 90000;
+
+// ───────────────────────────────────────────────────────────────────────────────
+// Express
+// ───────────────────────────────────────────────────────────────────────────────
 app.use(
   cors({
     origin: "*",
@@ -50,13 +103,10 @@ app.use(
 
 app.use(express.json({ limit: "25mb" }));
 
-// ───────────────────────────────────────────────────────────────────────────────
-// Public routes
-// ───────────────────────────────────────────────────────────────────────────────
 app.get("/", (_req, res) => {
   res.json({
     ok: true,
-    service: "clinical-copilot",
+    service: "talky-clinical-copilot",
     status: "running",
   });
 });
@@ -64,13 +114,13 @@ app.get("/", (_req, res) => {
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
-    service: "clinical-copilot",
+    service: "talky-clinical-copilot",
     sessions: sessions.size,
   });
 });
 
 // ───────────────────────────────────────────────────────────────────────────────
-// Auth Middleware
+// Auth
 // ───────────────────────────────────────────────────────────────────────────────
 app.use((req, res, next) => {
   if (
@@ -106,8 +156,10 @@ function getSession(id = "default") {
       id,
       turns: [],
       oneLiner: "",
-      title: "Clinical Copilot",
+      title: "Talky",
       shownBubbles: [],
+      surfacedTopicKeys: [],
+      surfacedModes: [],
       lastActiveAt: Date.now(),
       lastSurfacedExpanded: "",
       lastSurfacedLabel: "",
@@ -137,13 +189,48 @@ function buildWindow(session) {
   return session.turns.map((t) => t.text).join("\n");
 }
 
-function rememberSurfacedBubble(session, text) {
-  const clean = normalizeWS(text);
-  if (!clean) return;
+function rememberSurfacedBubble(session, entry) {
+  const cleanExpanded = normalizeWS(entry?.expanded || "");
+  const cleanLabel = normalizeWS(entry?.label || "");
+  const cleanTopicKey = normalizeTopicKey(entry?.topicKey || "");
+  const cleanMode = normalizeMode(entry?.mode || "none");
+  const now = Date.now();
 
-  session.shownBubbles.unshift(clean);
-  if (session.shownBubbles.length > 20) {
-    session.shownBubbles = session.shownBubbles.slice(0, 20);
+  if (cleanExpanded) {
+    session.shownBubbles.unshift({
+      text: cleanExpanded,
+      label: cleanLabel,
+      topicKey: cleanTopicKey,
+      mode: cleanMode,
+      ts: now,
+    });
+  }
+
+  if (session.shownBubbles.length > 24) {
+    session.shownBubbles = session.shownBubbles.slice(0, 24);
+  }
+
+  if (cleanTopicKey) {
+    session.surfacedTopicKeys.unshift({
+      key: cleanTopicKey,
+      mode: cleanMode,
+      ts: now,
+    });
+
+    if (session.surfacedTopicKeys.length > 30) {
+      session.surfacedTopicKeys = session.surfacedTopicKeys.slice(0, 30);
+    }
+  }
+
+  if (cleanMode && cleanMode !== "none") {
+    session.surfacedModes.unshift({
+      mode: cleanMode,
+      ts: now,
+    });
+
+    if (session.surfacedModes.length > 20) {
+      session.surfacedModes = session.surfacedModes.slice(0, 20);
+    }
   }
 }
 
@@ -175,23 +262,19 @@ function normalizeWS(text) {
     .trim();
 }
 
+function normalizeFlat(text) {
+  return normalizeWS(text).replace(/\n+/g, " ").trim();
+}
+
 function clamp(str, max) {
   const s = String(str || "");
   return s.length <= max ? s : s.slice(0, max);
 }
 
-function extractBubbleTexts(bubbles) {
-  if (!Array.isArray(bubbles)) return [];
-  return bubbles
-    .map((b) => normalizeWS(b?.expanded || b?.short || ""))
-    .filter(Boolean)
-    .slice(0, 20);
-}
-
 function tokenize(text) {
-  return normalizeWS(text)
+  return normalizeFlat(text)
     .toLowerCase()
-    .replace(/[^\w\s]/g, " ")
+    .replace(/[^\w\s/-]/g, " ")
     .split(/\s+/)
     .filter((w) => w.length > 2);
 }
@@ -211,24 +294,86 @@ function jaccardSimilarity(a, b) {
   return union ? intersection / union : 0;
 }
 
-function isNearDuplicate(text, history) {
-  const clean = normalizeWS(text);
-  if (!clean) return false;
-
-  for (const h of history || []) {
-    if (jaccardSimilarity(clean, h) >= BUBBLE_SIMILARITY_THRESHOLD) {
-      return true;
-    }
-  }
-
-  return false;
+function normalizeTopicKey(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^\w/-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 80);
 }
 
-function dedupe(text, history) {
-  const clean = normalizeWS(text);
-  if (!clean) return "";
+function normalizeMode(mode) {
+  const m = String(mode || "none").toLowerCase().trim();
+  const allowed = new Set([
+    "answer",
+    "fact_check",
+    "clinical_question",
+    "commentary",
+    "teaching",
+    "reference",
+    "none",
+  ]);
+  return allowed.has(m) ? m : "none";
+}
 
-  return isNearDuplicate(clean, history) ? "" : clean;
+function modeRank(mode) {
+  switch (mode) {
+    case "answer":
+      return 6;
+    case "fact_check":
+      return 5;
+    case "clinical_question":
+      return 4;
+    case "commentary":
+      return 3;
+    case "reference":
+      return 2;
+    case "teaching":
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+function getModeThresholds(mode) {
+  switch (mode) {
+    case "answer":
+      return {
+        minPriority: ANSWER_MIN_PRIORITY,
+        minConfidence: ANSWER_MIN_CONFIDENCE,
+      };
+    case "fact_check":
+      return {
+        minPriority: FACTCHECK_MIN_PRIORITY,
+        minConfidence: FACTCHECK_MIN_CONFIDENCE,
+      };
+    case "clinical_question":
+      return {
+        minPriority: CLINICAL_QUESTION_MIN_PRIORITY,
+        minConfidence: CLINICAL_QUESTION_MIN_CONFIDENCE,
+      };
+    case "commentary":
+      return {
+        minPriority: COMMENTARY_MIN_PRIORITY,
+        minConfidence: COMMENTARY_MIN_CONFIDENCE,
+      };
+    case "teaching":
+      return {
+        minPriority: TEACHING_MIN_PRIORITY,
+        minConfidence: TEACHING_MIN_CONFIDENCE,
+      };
+    case "reference":
+      return {
+        minPriority: REFERENCE_MIN_PRIORITY,
+        minConfidence: REFERENCE_MIN_CONFIDENCE,
+      };
+    default:
+      return {
+        minPriority: MIN_PRIORITY_TO_SURFACE,
+        minConfidence: MIN_CONFIDENCE_TO_SURFACE,
+      };
+  }
 }
 
 function parseModelJson(text) {
@@ -241,73 +386,273 @@ function parseModelJson(text) {
   return null;
 }
 
+function extractBubbleEntries(input) {
+  if (!Array.isArray(input)) return [];
+
+  return input
+    .map((b) => ({
+      text: normalizeWS(b?.expanded || b?.short || ""),
+      label: normalizeWS(b?.short || ""),
+      topicKey: normalizeTopicKey(b?.topicKey || ""),
+      mode: normalizeMode(
+        frontendCategoryToMode(b?.type || b?.mode || "commentary")
+      ),
+      ts: Date.now(),
+    }))
+    .filter((b) => b.text || b.label)
+    .slice(0, 20);
+}
+
+function frontendCategoryToMode(category) {
+  switch (String(category || "").toLowerCase().trim()) {
+    case "question":
+      return "answer";
+    case "factcheck":
+      return "fact_check";
+    case "reference":
+      return "reference";
+    case "insight":
+      return "commentary";
+    default:
+      return "commentary";
+  }
+}
+
+function modeToFrontendCategory(mode) {
+  switch (normalizeMode(mode)) {
+    case "answer":
+      return "question";
+    case "fact_check":
+      return "factcheck";
+    case "reference":
+      return "reference";
+    case "clinical_question":
+    case "commentary":
+    case "teaching":
+      return "insight";
+    default:
+      return "none";
+  }
+}
+
+function makeLabelForMode(mode, label, title) {
+  const cleanLabel = normalizeFlat(label);
+  const cleanTitle = normalizeFlat(title);
+
+  const base = cleanLabel || cleanTitle || "";
+
+  if (!base) {
+    switch (mode) {
+      case "answer":
+        return "Answer";
+      case "fact_check":
+        return "Correction";
+      case "clinical_question":
+        return "Ask";
+      case "commentary":
+        return "Lean";
+      case "teaching":
+        return "Pearl";
+      case "reference":
+        return "Reference";
+      default:
+        return "";
+    }
+  }
+
+  const trimmed = clamp(base, 22);
+
+  switch (mode) {
+    case "answer":
+      return clamp(`Ans: ${trimmed}`, 28);
+    case "fact_check":
+      return clamp(`Fix: ${trimmed}`, 28);
+    case "clinical_question":
+      return clamp(`Ask: ${trimmed}`, 28);
+    case "commentary":
+      return clamp(`Lean: ${trimmed}`, 28);
+    case "teaching":
+      return clamp(`Pearl: ${trimmed}`, 28);
+    case "reference":
+      return clamp(`Ref: ${trimmed}`, 28);
+    default:
+      return clamp(trimmed, 28);
+  }
+}
+
+function bodyLooksGeneric(text) {
+  const clean = normalizeFlat(text).toLowerCase();
+  if (!clean) return true;
+
+  const genericPatterns = [
+    "correlate clinically",
+    "consider further workup",
+    "clinical correlation",
+    "follow up clinically",
+    "could be considered",
+    "depends on the clinical context",
+    "additional imaging may be helpful",
+    "continue to monitor",
+    "rule out stroke",
+    "further evaluation is warranted",
+    "recommend discussing with the team",
+  ];
+
+  return genericPatterns.some((p) => clean.includes(p));
+}
+
+function transcriptOverlapTooHigh(body, recentTranscript, transcriptWindow) {
+  const compareA = normalizeFlat(recentTranscript || "");
+  const compareB = normalizeFlat(transcriptWindow || "");
+  const cleanBody = normalizeFlat(body || "");
+
+  if (!cleanBody) return true;
+
+  const simRecent = jaccardSimilarity(cleanBody, compareA);
+  const simWindow = jaccardSimilarity(cleanBody, compareB);
+
+  return Math.max(simRecent, simWindow) >= TRANSCRIPT_OVERLAP_SUPPRESSION_THRESHOLD;
+}
+
+function findNearDuplicate(body, label, history) {
+  const cleanBody = normalizeFlat(body);
+  const cleanLabel = normalizeFlat(label);
+
+  for (const h of history || []) {
+    const textSim = cleanBody
+      ? jaccardSimilarity(cleanBody, h?.text || "")
+      : 0;
+    const labelSim = cleanLabel
+      ? jaccardSimilarity(cleanLabel, h?.label || "")
+      : 0;
+
+    if (
+      textSim >= BUBBLE_SIMILARITY_THRESHOLD ||
+      labelSim >= LABEL_SIMILARITY_THRESHOLD
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function topicRecentlySurfaced(session, topicKey) {
+  const clean = normalizeTopicKey(topicKey);
+  if (!clean) return false;
+
+  const now = Date.now();
+  return (session.surfacedTopicKeys || []).some(
+    (t) => t.key === clean && now - t.ts < TOPIC_COOLDOWN_MS
+  );
+}
+
+function modeRecentlySurfaced(session, mode) {
+  const clean = normalizeMode(mode);
+  if (!clean || clean === "none") return false;
+
+  const now = Date.now();
+  return (session.surfacedModes || []).some(
+    (m) => m.mode === clean && now - m.ts < MODE_COOLDOWN_MS
+  );
+}
+
+function recentHistoryForPrompt(session, bubbles = []) {
+  const merged = [
+    ...extractBubbleEntries(bubbles),
+    ...(session.shownBubbles || []),
+  ];
+
+  const seen = new Set();
+  const out = [];
+
+  for (const item of merged) {
+    const key = `${item.topicKey}|${item.label}|${item.text}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+    if (out.length >= 12) break;
+  }
+
+  return out;
+}
+
+function buildRecentContext(session, maxTurns = 8) {
+  const turns = session.turns.slice(-maxTurns);
+  return turns.map((t) => t.text).join("\n");
+}
+
 // Compact model schema → compatibility schema for current frontend
 function normalizeAnalysis(parsed) {
   if (!parsed || typeof parsed !== "object") {
     return {
-      title: "",
+      mode: "none",
+      priority: 0,
+      confidence: 0,
+      title: "Talky",
       one_liner: "",
       bubble_label: "",
-      question_detected: false,
+      question_detected: true,
       answer: "",
       answer_expanded: "",
       insight: "",
       insight_expanded: "",
       category: "none",
-      confidence: 0,
       summary: "",
       content: "",
+      topic_key: "",
     };
   }
 
-  const rawCategory = String(parsed.category || "none").toLowerCase().trim();
-  const allowed = new Set([
-    "question",
-    "factcheck",
-    "insight",
-    "reference",
-    "none",
-  ]);
-  const category = allowed.has(rawCategory) ? rawCategory : "none";
+  const mode = normalizeMode(parsed.mode);
+  let priority = Number(parsed.priority);
+  let confidence = Number(parsed.confidence);
 
-  let confidence = 0;
-  if (
-    typeof parsed.confidence === "number" &&
-    Number.isFinite(parsed.confidence)
-  ) {
-    confidence = Math.max(0, Math.min(1, parsed.confidence));
-  }
+  if (!Number.isFinite(priority)) priority = 0;
+  if (!Number.isFinite(confidence)) confidence = 0;
 
-  const title = clamp(normalizeWS(parsed.title || ""), 48);
-  const oneLiner = clamp(normalizeWS(parsed.summary || ""), 700);
-  const bubbleLabel = clamp(normalizeWS(parsed.label || ""), 28);
-  const content = clamp(normalizeWS(parsed.content || ""), 1400);
+  priority = Math.max(0, Math.min(100, Math.round(priority)));
+  confidence = Math.max(0, Math.min(1, confidence));
 
-  const minConfidence =
-    category === "question"
-      ? QUESTION_CONFIDENCE_TO_SURFACE
-      : MIN_CONFIDENCE_TO_SURFACE;
+  const title = clamp(normalizeFlat(parsed.title || ""), 48) || "Talky";
+  const summary = clamp(normalizeWS(parsed.summary || ""), 900);
+  const rawLabel = clamp(normalizeFlat(parsed.label || ""), 32);
+  const body = clamp(normalizeWS(parsed.body || ""), 1600);
+  const topicKey = normalizeTopicKey(parsed.topic_key || "");
+
+  const thresholds = getModeThresholds(mode);
+
+  const globalPass =
+    priority >= MIN_PRIORITY_TO_SURFACE &&
+    confidence >= MIN_CONFIDENCE_TO_SURFACE;
+
+  const modePass =
+    priority >= thresholds.minPriority &&
+    confidence >= thresholds.minConfidence;
 
   const shouldSurface =
-    category !== "none" &&
-    !!content &&
-    confidence >= minConfidence;
+    mode !== "none" && !!body && !bodyLooksGeneric(body) && (modePass || (mode === "answer" && globalPass));
 
-  const isQuestion = shouldSurface && category === "question";
+  const frontendCategory = shouldSurface ? modeToFrontendCategory(mode) : "none";
+  const bubbleLabel = shouldSurface ? makeLabelForMode(mode, rawLabel, title) : "";
+  const isQuestionLike = shouldSurface && mode === "answer";
 
   return {
+    mode: shouldSurface ? mode : "none",
+    priority: shouldSurface ? priority : 0,
+    confidence: shouldSurface ? confidence : 0,
     title,
-    one_liner: oneLiner,
+    one_liner: summary || "Conversation in progress",
     bubble_label: bubbleLabel,
-    question_detected: isQuestion,
-    answer: isQuestion ? bubbleLabel || title || "Question" : "",
-    answer_expanded: isQuestion ? content : "",
-    insight: !isQuestion && shouldSurface ? bubbleLabel || title || "Insight" : "",
-    insight_expanded: !isQuestion && shouldSurface ? content : "",
-    category: shouldSurface ? category : "none",
-    confidence,
-    summary: oneLiner,
-    content,
+    question_detected: isQuestionLike,
+    answer: isQuestionLike ? bubbleLabel || "Answer" : "",
+    answer_expanded: isQuestionLike ? body : "",
+    insight: !isQuestionLike && shouldSurface ? bubbleLabel || "Insight" : "",
+    insight_expanded: !isQuestionLike && shouldSurface ? body : "",
+    category: frontendCategory,
+    summary,
+    content: body,
+    topic_key: topicKey,
   };
 }
 
@@ -319,88 +664,110 @@ function buildPrompt({
   transcriptWindow,
   priorSummary,
   priorTitle,
+  recentContext,
   previousBubbles,
 }) {
   const bubbleHistory = previousBubbles?.length
-    ? previousBubbles.map((b, i) => `${i + 1}. ${b}`).join("\n")
+    ? previousBubbles
+        .map((b, i) => {
+          const parts = [];
+          if (b.mode) parts.push(`mode=${b.mode}`);
+          if (b.topicKey) parts.push(`topic=${b.topicKey}`);
+          if (b.label) parts.push(`label=${b.label}`);
+          if (b.text) parts.push(`text=${b.text}`);
+          return `${i + 1}. ${parts.join(" | ")}`;
+        })
+        .join("\n")
     : "none";
 
-  return `You are a real-time clinical decision-support assistant embedded in smart glasses worn by an attending vascular neurologist.
+  return `You are Talky, an elite real-time neurologic clinical copilot embedded in smart glasses worn by a vascular neurologist.
 
-USER PROFILE
-- Attending vascular neurologist
-- Expert in stroke care, neurology, and standard protocols
-- Does NOT need definitions, teaching, or basic explanations
-- Values speed, precision, and high-signal insights only
+IDENTITY
+- Think like a world-renowned neurologist silently listening at bedside, table rounds, consult rounds, conference, clinic, or stroke alert.
+- Your job is NOT to summarize the transcript.
+- Your job is to add the single most useful thought that would actually help in the moment.
 
-CONTEXT
-You are processing a live clinical conversation (rounds, consults, clinic, ED, stroke alert, teaching, consults).
+WHO YOU ARE HELPING
+- The wearer is already a neurologist.
+- Do not explain basic concepts.
+- Do not give textbook filler.
+- Do not pad.
+- Be concise, sharp, and high-yield.
 
-YOUR JOB
-Return ONLY high-value output. Most analysis cycles should return "none".
-Do NOT keep reissuing the same insight during a pause. If the best output is the same as a recent bubble, return "none".
+PRIORITY ORDER
+1. Answer a direct question asked aloud.
+2. Correct a medically false or unsafe statement if confidence is high.
+3. Ask ONE high-yield clinical question that would materially change diagnosis or management.
+4. Provide concise diagnostic or management commentary if there is a strong lean with a lock-in discriminator.
+5. Provide a short teaching pearl only if it is genuinely useful and niche.
+6. Otherwise return none.
 
-You MUST return ONLY valid JSON in this exact format:
+YOUR MODES
+- answer
+- fact_check
+- clinical_question
+- commentary
+- teaching
+- reference
+- none
+
+MODE DEFINITIONS
+- answer: someone directly asked a question aloud and you can answer it.
+- fact_check: the speaker said something materially incorrect, misleading, or unsafe.
+- clinical_question: ask exactly one missing question whose answer would significantly move the case.
+- commentary: your best high-value attending-level interpretation or next discriminator.
+- teaching: short niche pearl only when truly useful.
+- reference: brief protocol/detail lookup when explicitly asked for a reference-style fact.
+- none: nothing worth surfacing.
+
+STRICT RULES
+- Prefer silence over low-value output.
+- Do not restate the transcript.
+- Do not paraphrase what was already said unless correcting it.
+- Do not generate generic suggestions.
+- Do not say "consider more workup" unless you specify exactly why it matters now.
+- If asking a clinical question, ask only ONE question.
+- If providing commentary, include the strongest reason and what would lock it in or move it.
+- If fact checking, be very careful and only do it when confidence is high.
+- Avoid repeating recent surfaced items even if worded differently.
+- Teaching pearls should be short and niche, not basic definitions.
+- Do not output more than one idea.
+
+OUTPUT JSON ONLY
+Return ONLY valid JSON with this exact schema:
 {
-  "title": "≤5 words",
-  "summary": "rolling conversation summary, 1-4 sentences, can be long if the conversation is complex",
-  "label": "hyper-abbreviated bubble label, 1-3 words, e.g. Eliquis Trials",
-  "category": "question | factcheck | insight | reference | none",
-  "content": "2-6 dense expert sentences, 90-260 words, include the non-obvious why, the competing concern, and what changes management",
-  "confidence": 0.0-1.0
+  "mode": "answer | fact_check | clinical_question | commentary | teaching | reference | none",
+  "priority": 0-100,
+  "confidence": 0.0-1.0,
+  "title": "2-5 words",
+  "label": "very short topic label, 1-4 words",
+  "body": "1-4 dense sentences, usually 35-140 words, no filler",
+  "summary": "rolling 1-4 sentence conversation summary for UI context",
+  "topic_key": "stable short slug for the core idea"
 }
 
-DECISION LOGIC
-1. If a direct clinical question is asked:
-   - category = "question"
-   - content = direct expert answer
-   - label = ultra-short answer/topic label
+SCORING GUIDANCE
+- answer should usually have the highest priority if a real question was asked.
+- fact_check should be rare and high-confidence.
+- commentary should only fire if it is genuinely additive.
+- teaching should be less preferred than answer, fact_check, clinical_question, and commentary.
+- none is the correct choice very often.
 
-2. If someone says something factually wrong, unsafe, or guideline-deviant:
-   - category = "factcheck"
-   - content = concise correction plus why it matters
-   - label = ultra-short correction label
+GOOD BEHAVIOR EXAMPLES
+- If they ask: "What findings suggest MMN rather than ALS?" -> answer directly.
+- If they mention CSF pleocytosis in a neuroinflammatory case -> maybe ask whether it is lymphocytic vs neutrophilic if that would truly move the differential.
+- If the conversation strongly fits ADEM vs MS -> commentary can say why and what locks it in.
+- If someone states an actually incorrect medical claim -> fact_check, but only if confidence is high.
 
-3. If no question was asked:
-   - only output category = "insight" if there is something genuinely management-changing, such as:
-     - missing critical decision data
-     - contradiction in discussion
-     - non-obvious contraindication or risk
-     - subtle guideline nuance
-     - high-impact clinical pitfall
-     - a better-fit diagnosis/workup explanation that changes urgency or priority
+BAD BEHAVIOR
+- repeating history that was already spoken
+- generic next steps
+- generic definitions
+- filler teaching
+- multiple questions
+- broad low-yield differentials
 
-4. If a specific dose, protocol detail, or reference value is explicitly requested:
-   - category = "reference"
-
-5. If nothing high-value is present:
-   - category = "none"
-   - label = ""
-   - content = ""
-
-STRICT QUALITY BAR
-- Never suggest a generic next test unless you explain the specific reason it matters now
-- Bad example: "MRI brain would be helpful to rule out stroke"
-- Good example: "Positional trigger with ear fullness after trauma pushes vestibular injury above central ischemia. Central ischemia stays on the table if symptoms are persistent, atypical, or paired with focal findings, but MRI is not just 'because stroke' here; it matters only if the bedside story stops fitting a peripheral process."
-- Do NOT define basic terms
-- Do NOT teach
-- Do NOT restate the obvious plan
-- Do NOT produce textbook filler
-- Do NOT repeat prior bubbles, even with slightly different wording
-- If the thought is generic, low-yield, or obvious to a vascular neurologist, return "none"
-- Prefer one strong insight over several weak ones
-- Expanded content should feel like a concise attending-level reasoning note, not a slogan
-- label must be extremely short and glanceable
-
-STYLE
-- Expert-to-expert
-- High-signal
-- Specific
-- Non-obvious
-- summary should actually capture the main points of the conversation and may be long if needed
-- content should include nuance, not just recommendation
-
-PREVIOUS BUBBLES (do not repeat):
+PREVIOUS SURFACED ITEMS (do not repeat conceptually):
 ${bubbleHistory}
 
 PRIOR TITLE:
@@ -409,13 +776,16 @@ ${priorTitle || "none"}
 PRIOR SUMMARY:
 ${priorSummary || "none"}
 
+RECENT CONTEXT WINDOW:
+${recentContext || "none"}
+
 FULL TRANSCRIPT WINDOW:
 ${transcriptWindow || "none"}
 
 MOST RECENT TRANSCRIPT:
 ${recentTranscript || "none"}
 
-Return ONLY valid JSON. No markdown. No commentary.`;
+Return ONLY valid JSON.`;
 }
 
 async function analyzeTranscript({
@@ -423,24 +793,26 @@ async function analyzeTranscript({
   transcriptWindow,
   priorSummary,
   priorTitle,
+  recentContext,
   previousBubbles,
 }) {
   const prompt = buildPrompt({
-    recentTranscript: clamp(recentTranscript, 4000),
-    transcriptWindow: clamp(transcriptWindow, 8000),
-    priorSummary: clamp(priorSummary || "", 600),
-    priorTitle: clamp(priorTitle || "", 80),
+    recentTranscript: clamp(recentTranscript, 4500),
+    transcriptWindow: clamp(transcriptWindow, 9000),
+    priorSummary: clamp(priorSummary || "", 900),
+    priorTitle: clamp(priorTitle || "", 120),
+    recentContext: clamp(recentContext || "", 5000),
     previousBubbles: previousBubbles || [],
   });
 
   const response = await openai.chat.completions.create({
     model: ANALYZE_MODEL,
-    temperature: 0.12,
-    max_tokens: 600,
+    temperature: 0.08,
+    max_tokens: 700,
     response_format: { type: "json_object" },
     messages: [
       { role: "system", content: prompt },
-      { role: "user", content: "Analyze the transcript and return JSON." },
+      { role: "user", content: "Analyze the live conversation and return JSON only." },
     ],
   });
 
@@ -449,9 +821,78 @@ async function analyzeTranscript({
   const normalized = normalizeAnalysis(parsed);
 
   if (!normalized.one_liner) normalized.one_liner = "Conversation in progress";
-  if (!normalized.title) normalized.title = "Clinical Copilot";
+  if (!normalized.title) normalized.title = "Talky";
 
   return normalized;
+}
+
+function shouldSuppressAnalysis({
+  analyzed,
+  session,
+  priorHistory,
+  recentTranscript,
+  transcriptWindow,
+}) {
+  if (!analyzed || analyzed.mode === "none") {
+    return { suppress: true, reason: "none" };
+  }
+
+  const body = analyzed.answer_expanded || analyzed.insight_expanded || "";
+  const label =
+    analyzed.answer || analyzed.insight || analyzed.bubble_label || "";
+  const mode = analyzed.mode;
+  const topicKey = analyzed.topic_key || "";
+
+  if (!body) {
+    return { suppress: true, reason: "empty_body" };
+  }
+
+  if (bodyLooksGeneric(body)) {
+    return { suppress: true, reason: "generic" };
+  }
+
+  if (findNearDuplicate(body, label, priorHistory)) {
+    return { suppress: true, reason: "duplicate_history" };
+  }
+
+  if (
+    session.lastSurfacedExpanded &&
+    jaccardSimilarity(body, session.lastSurfacedExpanded) >=
+      BUBBLE_SIMILARITY_THRESHOLD
+  ) {
+    return { suppress: true, reason: "duplicate_last_expanded" };
+  }
+
+  if (
+    session.lastSurfacedLabel &&
+    label &&
+    jaccardSimilarity(label, session.lastSurfacedLabel) >=
+      LABEL_SIMILARITY_THRESHOLD
+  ) {
+    return { suppress: true, reason: "duplicate_last_label" };
+  }
+
+  if (topicKey && topicRecentlySurfaced(session, topicKey)) {
+    return { suppress: true, reason: "topic_cooldown" };
+  }
+
+  if (
+    mode !== "answer" &&
+    mode !== "fact_check" &&
+    modeRecentlySurfaced(session, mode)
+  ) {
+    return { suppress: true, reason: "mode_cooldown" };
+  }
+
+  if (
+    mode !== "answer" &&
+    mode !== "fact_check" &&
+    transcriptOverlapTooHigh(body, recentTranscript, transcriptWindow)
+  ) {
+    return { suppress: true, reason: "too_close_to_transcript" };
+  }
+
+  return { suppress: false, reason: "" };
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
@@ -472,9 +913,9 @@ function openDeepgramSocket() {
       "&sample_rate=16000",
       "&channels=1",
       "&interim_results=true",
-      "&utterance_end_ms=1000",
-      "&punctuate=false",
-      "&smart_format=false",
+      "&utterance_end_ms=2000",
+      "&punctuate=true",
+      "&smart_format=true",
       "&endpointing=300",
     ].join("");
 
@@ -551,15 +992,13 @@ wss.on("connection", async (clientWs, req) => {
     try {
       const session = getSession(sessionId);
       const transcriptWindow = buildWindow(session);
-
-      const priorHistory = [
-        ...extractBubbleTexts(bubbles),
-        ...(session.shownBubbles || []),
-      ];
+      const recentContext = buildRecentContext(session, 8);
+      const priorHistory = recentHistoryForPrompt(session, bubbles);
 
       const analyzed = await analyzeTranscript({
         recentTranscript: accumulatedText,
         transcriptWindow,
+        recentContext,
         priorSummary: session.oneLiner,
         priorTitle: session.title,
         previousBubbles: priorHistory,
@@ -568,47 +1007,51 @@ wss.on("connection", async (clientWs, req) => {
       if (analyzed.title) session.title = analyzed.title;
       if (analyzed.one_liner) session.oneLiner = analyzed.one_liner;
 
-      const expandedCandidate =
-        analyzed.answer_expanded || analyzed.insight_expanded || "";
+      const suppression = shouldSuppressAnalysis({
+        analyzed,
+        session,
+        priorHistory,
+        recentTranscript: accumulatedText,
+        transcriptWindow,
+      });
 
-      const labelCandidate =
-        analyzed.answer || analyzed.insight || analyzed.bubble_label || "";
+      if (suppression.suppress) {
+        lastAnalyzedLen = accumulatedText.length;
 
-      const duplicateExpanded =
-        !!expandedCandidate &&
-        (isNearDuplicate(expandedCandidate, priorHistory) ||
-          isNearDuplicate(expandedCandidate, [
-            session.lastSurfacedExpanded,
-          ]));
-
-      const duplicateLabel =
-        !!labelCandidate &&
-        isNearDuplicate(labelCandidate, [
-          session.lastSurfacedLabel,
-        ]);
-
-      if (
-        analyzed.category !== "none" &&
-        (duplicateExpanded || duplicateLabel)
-      ) {
-        analyzed.category = "none";
-        analyzed.question_detected = false;
-        analyzed.answer = "";
-        analyzed.answer_expanded = "";
-        analyzed.insight = "";
-        analyzed.insight_expanded = "";
-        analyzed.bubble_label = "";
+        sendJson({
+          type: "analysis",
+          title: session.title || analyzed.title || "Talky",
+          one_liner: analyzed.one_liner || session.oneLiner || "Conversation in progress",
+          bubble_label: "",
+          question_detected: false,
+          answer: "",
+          answer_expanded: "",
+          insight: "",
+          insight_expanded: "",
+          category: "none",
+          confidence: analyzed.confidence || 0,
+          priority: analyzed.priority || 0,
+          mode: "none",
+          topic_key: analyzed.topic_key || "",
+        });
+        return;
       }
 
       lastAnalyzedLen = accumulatedText.length;
 
-      if (analyzed.answer_expanded || analyzed.insight_expanded) {
-        const surfaced = analyzed.answer_expanded || analyzed.insight_expanded;
-        const surfacedLabel = analyzed.answer || analyzed.insight || analyzed.bubble_label || "";
-        session.lastSurfacedExpanded = surfaced;
-        session.lastSurfacedLabel = surfacedLabel;
-        rememberSurfacedBubble(session, surfaced);
-      }
+      const surfaced = analyzed.answer_expanded || analyzed.insight_expanded || "";
+      const surfacedLabel =
+        analyzed.answer || analyzed.insight || analyzed.bubble_label || "";
+
+      session.lastSurfacedExpanded = surfaced;
+      session.lastSurfacedLabel = surfacedLabel;
+
+      rememberSurfacedBubble(session, {
+        expanded: surfaced,
+        label: surfacedLabel,
+        topicKey: analyzed.topic_key || "",
+        mode: analyzed.mode,
+      });
 
       sendJson({
         type: "analysis",
@@ -622,6 +1065,9 @@ wss.on("connection", async (clientWs, req) => {
         insight_expanded: analyzed.insight_expanded || "",
         category: analyzed.category,
         confidence: analyzed.confidence,
+        priority: analyzed.priority,
+        mode: analyzed.mode,
+        topic_key: analyzed.topic_key || "",
       });
     } catch (err) {
       console.error("Analysis error:", err.message);
@@ -754,6 +1200,9 @@ wss.on("connection", async (clientWs, req) => {
   });
 });
 
+// ───────────────────────────────────────────────────────────────────────────────
+// Maintenance routes
+// ───────────────────────────────────────────────────────────────────────────────
 app.post("/session/clear", (req, res) => {
   const id = String(req.body?.sessionId || "default");
   sessions.delete(id);
